@@ -48,30 +48,28 @@ define(function(require, exports, module) {
   var languages = {
     js:{
       compiler: require('$LIB/acorn'),
-      compile: function(string, args) {
+      compile: function(codeStr, args) {
         // this returns a compiled function or an error
-        var head = 'function __parsetest__('+args.join(',')+'){';
-        var src = head + string+'}';
+        var head = 'function __parsetest__(' + args + '){',
+          src = head + codeStr + '}';
         try { // we parse it just for errors
           this.compiler.parse(src);
+          return codeStr;
         } catch(e) {
           var at = charPos(src, e.loc && e.loc.line - 1, e.loc && e.loc.column + 1);
           return new DreemError("JS Compilation Error: " + e.message, at - head.length);
         }
-        return string;
       }
     },
     coffee:{
       compiler: require('$LIB/coffee-script'),
-      compile: function(string, args) {
+      compile: function(codeStr, args) {
         // compile the code
         try {
-          var out = this.compiler.compile(string);
+          return this.compiler.compile(codeStr, {bare: true});
         } catch(e) { // we have an exception. throw it back
-          return new DreemError("CoffeeScript compilation Error: " + e.message, charPos(string, e.location && e.location.first_line, e.location && e.location.first_column));
+          return new DreemError("CoffeeScript compilation Error: " + e.message, charPos(codeStr, e.location && e.location.first_line, e.location && e.location.first_column));
         }
-        // lets return the blob without the function headers
-        return out.split('\n').slice(1,-2).join('\n');
       }
     }
   };
@@ -80,66 +78,37 @@ define(function(require, exports, module) {
     // Method type overrides class or instanceof type which is what is
     // what the language arg is.
     language = language || 'js';
-    if (node.attr && node.attr.type) language = node.attr.type;
+    
+    var attr = node.attr;
+    if (attr && attr.type) language = attr.type;
     
     // lets on-demand load the language
     var langproc = languages[language];
-    if (!langproc) {
+    if (langproc) {
+      // give the method a unique but human readable name
+      var name = node.tag + '_' + (attr && (attr.name || attr.event)) + '_' + node.pos + '_' + language;
+      if (parent && (parent.tag == 'class' || parent.tag == 'mixin')) name = (parent.attr && parent.attr.name) + '_' + name;
+      name = name.split(define.SEPARATOR_REGEX).join('_');
+      name = exports.classnameToJS(name);
+      
+      var args = (attr && attr.args) || '';
+      var compiled = langproc.compile(concatCode(node), args);
+      
+      if (compiled instanceof DreemError) { // the compiler returned an error
+        compiled.where += node.child[0].pos;
+        errors.push(compiled);
+        return errors;
+      }
+      
+      return {
+        name:name,
+        args:args,
+        comp:compiled
+      };
+    } else {
       errors.push(new DreemError('Unknown language used ' + language, node.pos));
       return errors;
     }
-    
-    // give the method a unique but human readable name
-    var name = node.tag + '_' + (node.attr && (node.attr.name || node.attr.event)) + '_' + node.pos + '_' + language;
-    if (parent && (parent.tag == 'class' || parent.tag == 'mixin')) name = (parent.attr && parent.attr.name) + '_' + name;
-    name = name.split(define.SEPARATOR_REGEX).join('_');
-    
-    name = exports.classnameToJS(name);
-    
-    //node.method_id = output.methods.length
-    var lang = languages[language];
-    var args = node.attr && node.attr.args ? node.attr.args.split(define.SEPARATOR_REGEX): [];
-    var compiled = lang.compile(concatCode(node), args);
-    
-    if (compiled instanceof DreemError) { // the compiler returned an error
-      compiled.where += node.child[0].pos;
-      errors.push(compiled);
-      return errors;
-    }
-    
-    // lets re-indent this thing.
-    var lines = compiled.split('\n');
-    
-    // lets scan for the shortest indentation which is not \n
-    var shortest = Infinity;
-    for (var i = 0; i < lines.length; i++) {
-      var m = lines[i].match(/^( |\t)+/g);
-      if (m && m[0].length) {
-        m = m[0];
-        var len = m.length;
-        if (m.charCodeAt(0) == 32) {
-          // replace by tabs, just because.
-          if (len&1) len++; // use tabstop of 2 to fix up spaces
-          len = len / 2;
-          lines[i] = Array(len + 1).join('\t') + lines[i].slice(m.length);
-        }
-        if (len < shortest && lines[i] !== '\n') shortest = len;
-      }
-    }
-    if (shortest != Infinity) {
-      for (var i = 0; i < lines.length; i++) {
-        if (i > 0 || lines[0].length !== 0) {
-          lines[i] = indent + lines[i].slice(shortest).replace(/( |\t)+$/g,'');
-        }
-      }
-      compiled = lines.join('\n');
-    }
-    
-    return {
-      name: name,
-      args: args,
-      comp: compiled
-    };
   };
 
   exports.classnameToJS = function(name) {
@@ -273,8 +242,8 @@ define(function(require, exports, module) {
               if (fn === errors) continue;
               
               var args = fn.args;
-              if (!args && childTagName == 'setter') args = ['value'];
-              body += '\t\tthis.' + attrname +' = function(' + args.join(', ') + '){' + fn.comp + '}\n';
+              if (!args && childTagName == 'setter') args = 'value';
+              body += '\t\tthis.' + attrname +' = function(' + args + '){' + fn.comp + '}\n';
             }
             break;
           default:
@@ -442,7 +411,7 @@ define(function(require, exports, module) {
                     fn.comp = 'try {' + fn.comp + '} finally { if (this.chained_' + attrname + ') { this.chained_' + attrname + '(); } }'
                   }
                 }
-                props += attrname + ': function(' + fn.args.join(', ') + ') {' + fn.comp + '}';
+                props += attrname + ': function(' + fn.args + ') {' + fn.comp + '}';
               }
               break;
             case 'attribute':
